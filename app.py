@@ -546,8 +546,26 @@ elif modo.startswith("🔍"):
     excluir_pipe   = fa2.checkbox("🚫 Excluir empresas já no Pipeline", value=_pre.get("excluir_pipe", False))
     ordenar_score  = fa3.checkbox("⭐ Ordenar por Score M&A", value=_pre.get("ordenar_score", True), help="Ordena os resultados pelo score de atratividade M&A calculado automaticamente")
 
-    sb1, sb2 = st.columns([3,1])
-    if sb1.button("🔍  Buscar empresas →", type="primary"):
+    ba1, ba2 = st.columns([2, 1])
+    buscar_btn = ba1.button("🔍  Buscar empresas →", type="primary")
+
+    with ba2.container():
+        nome_salvar = st.text_input("💾 Nome para salvar busca", placeholder="ex: TI SP acima 50MM", label_visibility="collapsed")
+        salvar_btn  = st.button("💾 Salvar esta busca", use_container_width=True)
+
+    if salvar_btn:
+        if nome_salvar:
+            busca_salvar(nome_salvar, {
+                "setor":setor,"cnae_manual":cnae_manual,"nome_busca":nome_busca,
+                "porte":porte,"ufs_sel":ufs_sel,"fat_min":fat_min,"fat_max":fat_max,
+                "ano_ini":ano_ini,"ano_fim":ano_fim,"limite":limite,
+                "so_email":so_email,"excluir_pipe":excluir_pipe,"ordenar_score":ordenar_score
+            })
+            st.success(f"✅ Busca '{nome_salvar}' salva!"); st.rerun()
+        else:
+            st.warning("Digite um nome antes de salvar.")
+
+    if buscar_btn:
         with st.spinner("Consultando base da Receita Federal..."):
             try:
                 df = buscar_rfb(
@@ -578,21 +596,6 @@ elif modo.startswith("🔍"):
             except Exception as e:
                 st.error(f"Erro: {e}"); st.code(str(e))
 
-    # Salvar busca
-    with sb2.expander("💾 Salvar busca"):
-        nome_salvar = st.text_input("Nome da busca", placeholder="ex: TI SP acima 50MM")
-        if st.button("Salvar →", type="primary"):
-            if nome_salvar:
-                busca_salvar(nome_salvar, {
-                    "setor":setor,"cnae_manual":cnae_manual,"nome_busca":nome_busca,
-                    "porte":porte,"ufs_sel":ufs_sel,"fat_min":fat_min,"fat_max":fat_max,
-                    "ano_ini":ano_ini,"ano_fim":ano_fim,"limite":limite,
-                    "so_email":so_email,"excluir_pipe":excluir_pipe,"ordenar_score":ordenar_score
-                })
-                st.success("Salvo!"); st.rerun()
-            else:
-                st.warning("Digite um nome para a busca.")
-
     if "rfb_df" in st.session_state:
         df = st.session_state["rfb_df"]
         _ord_score = st.session_state.get("rfb_ordenar_score", True)
@@ -614,12 +617,7 @@ elif modo.startswith("🔍"):
             s["Capital (R$MM)"]     = (s["capital_social"]/1e6).round(1)
             cols = ["Score M&A","razao_social","cnae","uf","municipio","Fat. Est. (R$MM)","EBITDA Est. (R$MM)","Capital (R$MM)","porte_est","email","fundacao"]
             show = s[[c for c in cols if c in s.columns]]
-
-            # destaque visual do score com color_map
-            st.dataframe(
-                show.style.background_gradient(subset=["Score M&A"] if "Score M&A" in show.columns else [], cmap="Greens"),
-                use_container_width=True, height=460
-            )
+            st.dataframe(show, use_container_width=True, height=460)
             export_df = show.copy()
             st.download_button("⬇️ Exportar Excel", to_excel_bytes(export_df, "Busca Ampla", "Busca Ampla — RFB"),
                                "naia_prospect.xlsx",
