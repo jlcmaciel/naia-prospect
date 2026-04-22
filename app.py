@@ -561,34 +561,69 @@ elif modo.startswith("🔍"):
 # MODO 3 — Comex
 # ═══════════════════════════════════════════════════════════════════════════════
 elif modo.startswith("🌎"):
-    st.markdown(f'<h2>Polos Exportadores <span style="background:{VERDE_CLARO};color:{FUNDO};padding:2px 10px;border-radius:12px;font-size:.75rem;font-weight:600">DADO REAL</span></h2><p style="color:#A5C8A5;font-size:.85rem">Volume exportado em US$ por município — Comex Stat / MDIC</p>', unsafe_allow_html=True)
+    st.markdown(f'<h2>Exportações por Estado <span style="background:{VERDE_CLARO};color:{FUNDO};padding:2px 10px;border-radius:12px;font-size:.75rem;font-weight:600">DADO REAL</span></h2><p style="color:#A5C8A5;font-size:.85rem">Volume exportado em US$ por UF e capítulo NCM — Comex Stat / MDIC</p>', unsafe_allow_html=True)
+
+    DETALHE_OPTS = {
+        "state":   "🗺️ Por Estado (UF)",
+        "chapter": "📦 Por Capítulo NCM",
+        "section": "🏭 Por Seção",
+    }
     c1,c2,c3,c4 = st.columns(4)
-    ano_i = c1.number_input("Ano início", 2010, 2025, 2023)
-    ano_f = c2.number_input("Ano fim", 2010, 2025, 2024)
-    uf_c  = c3.selectbox("Estado", ["","SP","RJ","MG","RS","PR","SC","BA","GO","ES","PE","CE"])
-    ncm   = c4.text_input("NCM prefixo", placeholder="02=carnes, 84=máquinas")
-    if st.button("Buscar polos exportadores →", type="primary"):
-        with st.spinner("Consultando Comex Stat..."):
-            payload = {"flow":"export","monthDetail":False,"period":{"from":f"{ano_i}-01","to":f"{ano_f}-12"},"filters":[],"details":["city"],"metrics":["metricFOB","metricKG"]}
-            if ncm: payload["filters"].append({"filter":"ncm","values":[ncm]})
-            if uf_c: payload["filters"].append({"filter":"state","values":[uf_c]})
+    ano_i   = c1.number_input("Ano início", 2010, 2025, 2023)
+    ano_f   = c2.number_input("Ano fim",    2010, 2025, 2024)
+    detalhe = c3.selectbox("Agrupar por", list(DETALHE_OPTS.keys()), format_func=lambda k: DETALHE_OPTS[k])
+    fluxo   = c4.selectbox("Fluxo", ["export","import"], format_func=lambda k: {"export":"Exportação","import":"Importação"}[k])
+
+    st.markdown(f"<p style='color:{VERDE_CLARO};font-weight:600;margin:.6rem 0 .2rem'>Filtros opcionais</p>", unsafe_allow_html=True)
+    f1,f2 = st.columns(2)
+    uf_c  = f1.selectbox("Estado (filtro)", ["","SP","RJ","MG","RS","PR","SC","BA","GO","DF","ES","PE","CE","AM","PA","MT","GO"])
+    ncm_c = f2.text_input("Capítulo NCM", placeholder="ex: 02 = Carnes, 84 = Máquinas, 27 = Petróleo")
+
+    if st.button("Buscar dados Comex →", type="primary"):
+        with st.spinner("Consultando Comex Stat / MDIC..."):
+            payload = {
+                "flow": fluxo,
+                "monthDetail": False,
+                "period": {"from": f"{ano_i}-01", "to": f"{ano_f}-12"},
+                "filters": [],
+                "details": [detalhe],
+                "metrics": ["metricFOB", "metricKG"]
+            }
+            if uf_c:  payload["filters"].append({"filter":"state",   "values":[uf_c]})
+            if ncm_c: payload["filters"].append({"filter":"chapter",  "values":[ncm_c.zfill(2)]})
             try:
                 r = requests.post("https://api-comexstat.mdic.gov.br/general", json=payload, timeout=30)
                 if r.ok:
                     data = r.json().get("data",{}).get("list",[])
                     if data:
                         df = pd.DataFrame(data)
-                        df["exportacao_usd"] = pd.to_numeric(df.get("metricFOB", df.get("exportacao_usd", 0)), errors="coerce")
-                        df["Exportação (US$MM)"] = (df["exportacao_usd"]/1e6).round(2)
-                        st.metric("Municípios exportadores", len(df))
-                        st.dataframe(df.sort_values("exportacao_usd",ascending=False).head(200), use_container_width=True, height=460)
+                        # normaliza coluna de valor
+                        fob_col = next((c for c in df.columns if "FOB" in c.upper() or "fob" in c), None)
+                        kg_col  = next((c for c in df.columns if "KG"  in c.upper() or "kg"  in c), None)
+                        df["Exportação (US$MM)"] = pd.to_numeric(df[fob_col], errors="coerce").div(1e6).round(2) if fob_col else 0
+                        df["Peso (mil ton)"]     = pd.to_numeric(df[kg_col],  errors="coerce").div(1e6).round(1) if kg_col  else 0
+                        df = df.sort_values("Exportação (US$MM)", ascending=False)
+                        # renomeia coluna de agrupamento
+                        label_col = {"state":"Estado","chapter":"Capítulo NCM","section":"Seção"}.get(detalhe, detalhe)
+                        if detalhe in df.columns:
+                            df = df.rename(columns={detalhe: label_col})
+                        m1,m2,m3 = st.columns(3)
+                        m1.metric("Registros", len(df))
+                        m2.metric("Total exportado", f"US$ {df['Exportação (US$MM)'].sum():.0f}MM")
+                        m3.metric("Maior", f"{df[label_col].iloc[0] if label_col in df.columns else '-'}")
+                        show_cols = [c for c in [label_col,"year","Exportação (US$MM)","Peso (mil ton)"] if c in df.columns]
+                        st.dataframe(df[show_cols], use_container_width=True, height=460)
                         st.download_button("⬇️ Exportar Excel",
-                                           to_excel_bytes(df.sort_values("exportacao_usd",ascending=False).head(200), "Comex", "Polos Exportadores"),
+                                           to_excel_bytes(df[show_cols], "Comex", "Exportações Comex Stat"),
                                            "naia_comex.xlsx",
                                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-                    else: st.warning("Sem dados. Tente ampliar os filtros.")
-                else: st.warning(f"API retornou {r.status_code}. Tente mais tarde.")
-            except Exception as e: st.error(str(e))
+                    else:
+                        st.warning("Sem dados para os filtros selecionados. Tente ampliar o período ou remover filtros.")
+                else:
+                    st.warning(f"API Comex retornou erro {r.status_code}. Tente novamente em alguns segundos.")
+                    st.code(r.text[:300])
+            except Exception as e:
+                st.error(f"Erro ao consultar Comex Stat: {e}")
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # MODO 4 — Pipeline
