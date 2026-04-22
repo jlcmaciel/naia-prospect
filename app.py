@@ -568,31 +568,46 @@ elif modo.startswith("🔍"):
     if buscar_btn:
         with st.spinner("Consultando base da Receita Federal..."):
             try:
-                df = buscar_rfb(
+                df_raw = buscar_rfb(
                     uf=ufs_sel or None, cnae=cnae, porte=porte,
                     fat_min_mm=fat_min, fat_max_mm=fat_max,
                     ano_min=ano_ini, ano_max=ano_fim,
                     limite=limite, nome=nome_busca, so_com_email=so_email
                 )
-                if df.empty:
-                    st.warning("Nenhuma empresa encontrada. Tente ampliar os filtros.")
+                n_bq = len(df_raw)
+                if df_raw.empty:
+                    st.warning("Nenhuma empresa encontrada no BigQuery. Tente ampliar os filtros.")
                 else:
+                    df = df_raw.copy()
                     df["fat_est"]    = df.apply(lambda r: fat_estimado(r.get("capital_social",0), r.get("cnae","")), axis=1)
                     df["ebitda_est"] = df.apply(lambda r: ebitda_estimado(r.get("fat_est",0), r.get("cnae","")), axis=1)
                     df["porte_est"]  = df["fat_est"].apply(porte_label)
-                    if fat_min > 0: df = df[df["fat_est"] >= fat_min*1e6]
-                    if fat_max > 0: df = df[df["fat_est"] <= fat_max*1e6]
+                    n_antes = len(df)
+                    if fat_min > 0: df = df[df["fat_est"] >= fat_min * 1_000_000]
+                    if fat_max > 0: df = df[df["fat_est"] <= fat_max * 1_000_000]
+                    n_depois = len(df)
                     # Score M&A
-                    fat_vals = df["fat_est"]
-                    fat_min_r, fat_max_r = fat_vals.min(), fat_vals.max()
-                    df["Score M&A"] = df.apply(lambda r: score_ma(r, fat_max_r, fat_min_r), axis=1)
+                    if not df.empty:
+                        fat_vals = df["fat_est"]
+                        fat_min_r, fat_max_r = fat_vals.min(), fat_vals.max()
+                        df["Score M&A"] = df.apply(lambda r: score_ma(r, fat_max_r, fat_min_r), axis=1)
                     # Excluir do pipeline
                     if excluir_pipe:
                         pipe_cnpjs = set(pipe_listar()["cnpj"].astype(str).tolist())
                         df = df[~df["cnpj"].astype(str).isin(pipe_cnpjs)]
                     st.session_state["rfb_df"] = df
                     st.session_state["rfb_ordenar_score"] = ordenar_score
-                    st.success(f"✅ {len(df)} empresas encontradas")
+                    if df.empty:
+                        st.warning(f"⚠️ BigQuery retornou {n_bq} empresas, mas o filtro de faturamento removeu todas.")
+                        # diagnóstico: mostra faixa real de fat_est encontrada
+                        df_diag = df_raw.copy()
+                        df_diag["fat_est"] = df_diag.apply(lambda r: fat_estimado(r.get("capital_social",0), r.get("cnae","")), axis=1)
+                        fat_min_real = df_diag["fat_est"].min() / 1_000_000
+                        fat_max_real = df_diag["fat_est"].max() / 1_000_000
+                        st.info(f"💡 Faturamento estimado das empresas encontradas: **R$ {fat_min_real:.0f}MM** a **R$ {fat_max_real:.0f}MM**. "
+                                f"Seu filtro era R$ {fat_min}MM a R$ {fat_max}MM. Ajuste a faixa.")
+                    else:
+                        st.success(f"✅ {n_depois} empresas encontradas (BigQuery: {n_bq} → após filtro fat.: {n_depois})")
             except Exception as e:
                 st.error(f"Erro: {e}"); st.code(str(e))
 
