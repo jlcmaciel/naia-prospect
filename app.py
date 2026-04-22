@@ -232,7 +232,9 @@ def _sql_rfb(uf=None, cnae="", porte="", fat_min_mm=0, fat_max_mm=0,
         elif isinstance(uf, str) and uf:
             where.append(f"est.sigla_uf = '{uf}'")
     if cnae:
-        where.append(f"STARTS_WITH(CAST(est.cnae_fiscal_principal AS STRING), '{cnae}')")
+        cnae_num = "".join(ch for ch in str(cnae) if ch.isdigit())
+        if cnae_num:
+            where.append(f"STARTS_WITH(CAST(est.cnae_fiscal_principal AS STRING), '{cnae_num}')")
     if porte:
         where.append(f"emp.porte = '{porte}'")
     if ano_min and ano_min > 1900:
