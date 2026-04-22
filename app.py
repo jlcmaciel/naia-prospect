@@ -219,9 +219,9 @@ def bq_query(sql: str) -> pd.DataFrame:
         return pd.DataFrame()
     return pandas_gbq.read_gbq(sql, project_id=project, credentials=_bq_creds())
 
-def buscar_rfb(uf="", cnae="", porte="", fat_min_mm=0, fat_max_mm=0, ano_min=1900, limite=500) -> pd.DataFrame:
-    # Converte faturamento estimado → faixa de capital social (proxy: fat ≈ capital × 3)
-    # Isso permite filtrar diretamente no BigQuery sem sobrecarregar a query
+def buscar_rfb(uf=None, cnae="", porte="", fat_min_mm=0, fat_max_mm=0,
+               ano_min=1900, ano_max=2026, limite=500,
+               nome="", so_com_email=False) -> pd.DataFrame:
     MULT = {"10":8,"11":6,"13":4,"17":5,"19":3,"20":4,"21":5,"22":4,"24":4,
             "26":3,"28":3,"29":4,"41":4,"46":6,"47":6,"49":4,"61":3,
             "62":3,"64":2,"68":2,"86":4,"85":3}
@@ -230,16 +230,25 @@ def buscar_rfb(uf="", cnae="", porte="", fat_min_mm=0, fat_max_mm=0, ano_min=190
     cap_max = int(fat_max_mm * 1e6 / mult) if fat_max_mm > 0 else 0
 
     where = ["est.situacao_cadastral = '2'"]
-    if uf:       where.append(f"est.sigla_uf = '{uf}'")
+    # múltiplos estados
+    if uf:
+        if isinstance(uf, list) and len(uf) == 1:
+            where.append(f"est.sigla_uf = '{uf[0]}'")
+        elif isinstance(uf, list) and len(uf) > 1:
+            ufs_str = ",".join([f"'{u}'" for u in uf])
+            where.append(f"est.sigla_uf IN ({ufs_str})")
+        elif isinstance(uf, str) and uf:
+            where.append(f"est.sigla_uf = '{uf}'")
     if cnae:     where.append(f"STARTS_WITH(CAST(est.cnae_fiscal_principal AS STRING), '{cnae}')")
     if porte:    where.append(f"emp.porte = '{porte}'")
     if cap_min > 0: where.append(f"emp.capital_social >= {cap_min}")
     if cap_max > 0: where.append(f"emp.capital_social <= {cap_max}")
     if ano_min > 1900: where.append(f"EXTRACT(YEAR FROM est.data_inicio_atividade) >= {ano_min}")
+    if ano_max < 2026: where.append(f"EXTRACT(YEAR FROM est.data_inicio_atividade) <= {ano_max}")
+    if nome:     where.append(f"UPPER(emp.razao_social) LIKE '%{nome.upper().strip()}%'")
+    if so_com_email: where.append("est.email IS NOT NULL AND est.email != ''")
 
-    # Ordena por capital DESC para pegar as maiores, ou ASC se filtrou por cap_max (mid-market)
     order = "ASC" if cap_max > 0 and cap_min == 0 else "DESC"
-
     sql = f"""
     SELECT est.cnpj, emp.razao_social, est.nome_fantasia,
            est.cnae_fiscal_principal AS cnae, est.sigla_uf AS uf,
@@ -294,6 +303,55 @@ def porte_label(fat):
     if fat < 300_000_000:  return "Média (R$30M–300M)"
     if fat < 1_000_000_000:return "Média-grande (R$300M–1B)"
     return "Grande (>R$1B)"
+
+def score_ma(row, fat_max_ref, fat_min_ref):
+    """Score M&A 0–100 baseado em faturamento, maturidade, EBITDA e contato disponível."""
+    score = 0
+    fat   = float(row.get("fat_est", 0) or 0)
+    ebitda= float(row.get("ebitda_est", 0) or 0)
+    # 1. Faturamento (0–35 pts) — normalizado dentro dos resultados
+    fat_range = max(fat_max_ref - fat_min_ref, 1)
+    score += 35 * min((fat - fat_min_ref) / fat_range, 1.0)
+    # 2. Margem EBITDA estimada (0–25 pts)
+    margem = ebitda / fat if fat > 0 else 0
+    score += min(margem / 0.40, 1.0) * 25
+    # 3. Maturidade (anos desde fundação) — empresas com 5–30 anos pontuam mais (0–25 pts)
+    try:
+        fund = pd.to_datetime(row.get("fundacao", None), errors="coerce")
+        anos = (datetime.now() - fund).days / 365 if pd.notna(fund) else 0
+        if   anos >= 5:  score += 25
+        elif anos >= 2:  score += 15
+        elif anos >= 1:  score += 5
+    except: pass
+    # 4. Contato disponível (0–15 pts)
+    if str(row.get("email","") or "").strip(): score += 8
+    if str(row.get("telefone","") or "").strip(): score += 7
+    return round(min(score, 100))
+
+# ── Buscas Salvas SQLite ──────────────────────────────────────────────────────
+import json as _json
+def _db_searches():
+    c = sqlite3.connect(DB)
+    c.execute("""CREATE TABLE IF NOT EXISTS buscas_salvas(
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        nome TEXT UNIQUE,
+        filtros TEXT,
+        criado_em TEXT,
+        ultima_exec TEXT)""")
+    return c
+def busca_salvar(nome, filtros: dict):
+    c = _db_searches()
+    c.execute("INSERT INTO buscas_salvas(nome,filtros,criado_em,ultima_exec) VALUES(?,?,?,?) "
+              "ON CONFLICT(nome) DO UPDATE SET filtros=excluded.filtros,ultima_exec=excluded.ultima_exec",
+              (nome, _json.dumps(filtros, ensure_ascii=False), datetime.now().isoformat(), datetime.now().isoformat()))
+    c.commit(); c.close()
+def busca_listar():
+    c = _db_searches()
+    try: rows = pd.read_sql("SELECT * FROM buscas_salvas ORDER BY ultima_exec DESC", c)
+    except: rows = pd.DataFrame()
+    c.close(); return rows
+def busca_deletar(nome):
+    c = _db_searches(); c.execute("DELETE FROM buscas_salvas WHERE nome=?", (nome,)); c.commit(); c.close()
 
 # ── Enriquecimento ────────────────────────────────────────────────────────────
 @lru_cache(maxsize=500)
@@ -438,49 +496,115 @@ elif modo.startswith("🔍"):
                "28":"🏭 Máquinas","29":"🚗 Veículos","41":"🏗️ Construção","46":"📦 Atacado",
                "47":"🛒 Varejo","49":"🚛 Transporte","61":"📡 Telecom","62":"💻 TI/Software",
                "64":"🏦 Financeiro","68":"🏢 Imobiliário","86":"🏥 Saúde","85":"🎓 Educação"}
-    UFS = ["","SP","RJ","MG","RS","PR","SC","BA","GO","DF","PE","CE","ES","PA","MT","MS","AM","MA","RN","PB","AL","SE","PI","RO","AC","AP","RR","TO"]
+    TODAS_UFS = ["SP","RJ","MG","RS","PR","SC","BA","GO","DF","PE","CE","ES","PA","MT","MS","AM","MA","RN","PB","AL","SE","PI","RO","AC","AP","RR","TO"]
 
-    st.markdown(f"<p style='color:{VERDE_CLARO};font-weight:600;margin-bottom:.3rem'>Setor & Localização</p>", unsafe_allow_html=True)
-    c1,c2,c3 = st.columns(3)
-    setor = c1.selectbox("Setor", list(SETORES.keys()), format_func=lambda k: SETORES[k])
-    cnae_manual = c1.text_input("Ou CNAE manual", placeholder="ex: 62, 10, 86")
-    cnae = cnae_manual.strip() or setor
-    uf = c2.selectbox("Estado", UFS)
-    porte = c2.selectbox("Porte", ["","01","03","05"], format_func=lambda k: {"":"Todos","01":"Micro","03":"EPP","05":"Médio/Grande"}[k])
+    # ── Buscas Salvas ─────────────────────────────────────────────────────────
+    buscas_df = busca_listar()
+    if not buscas_df.empty:
+        with st.expander(f"📂 Buscas salvas ({len(buscas_df)})", expanded=False):
+            for _, bs in buscas_df.iterrows():
+                bc1, bc2, bc3 = st.columns([4, 2, 1])
+                bc1.markdown(f"**{bs['nome']}**")
+                bc2.caption(f"Última exec: {str(bs.get('ultima_exec',''))[:10]}")
+                col_run, col_del = bc3.columns(2)
+                if col_run.button("▶", key=f"run_{bs['nome']}", help="Executar busca"):
+                    filtros = _json.loads(bs["filtros"])
+                    st.session_state["_busca_carregada"] = filtros
+                    st.rerun()
+                if col_del.button("🗑", key=f"del_{bs['nome']}", help="Excluir"):
+                    busca_deletar(bs["nome"]); st.rerun()
+
+    # pré-carrega filtros se uma busca salva foi acionada
+    _pre = st.session_state.pop("_busca_carregada", {})
+
+    # ── Filtros ───────────────────────────────────────────────────────────────
+    st.markdown(f"<p style='color:{VERDE_CLARO};font-weight:600;margin-bottom:.3rem'>Setor & Empresa</p>", unsafe_allow_html=True)
+    c1, c2 = st.columns(2)
+    setor       = c1.selectbox("Setor", list(SETORES.keys()), format_func=lambda k: SETORES[k],
+                                index=list(SETORES.keys()).index(_pre.get("setor","")) if _pre.get("setor","") in SETORES else 0)
+    cnae_manual = c1.text_input("Ou CNAE manual", value=_pre.get("cnae_manual",""), placeholder="ex: 62, 10, 86")
+    cnae        = cnae_manual.strip() or setor
+    nome_busca  = c2.text_input("🔎 Buscar por nome da empresa", value=_pre.get("nome_busca",""), placeholder="ex: Ambev, Grupo XP...")
+    porte       = c2.selectbox("Porte", ["","01","03","05"],
+                                format_func=lambda k: {"":"Todos","01":"Micro","03":"EPP","05":"Médio/Grande"}[k],
+                                index=["","01","03","05"].index(_pre.get("porte","")) if _pre.get("porte","") in ["","01","03","05"] else 0)
+
+    st.markdown(f"<p style='color:{VERDE_CLARO};font-weight:600;margin:.8rem 0 .3rem'>Localização</p>", unsafe_allow_html=True)
+    ufs_sel = st.multiselect("Estados (pode selecionar vários)", TODAS_UFS, default=_pre.get("ufs_sel",[]))
 
     st.markdown(f"<p style='color:{VERDE_CLARO};font-weight:600;margin:.8rem 0 .3rem'>Tamanho & Período</p>", unsafe_allow_html=True)
-    c4,c5,c6,c7 = st.columns(4)
-    fat_min = c4.number_input("Fat. mín (R$ MM)", 0, value=0, step=10)
-    fat_max = c5.number_input("Fat. máx (R$ MM)", 0, value=0, step=50)
-    ano_ini = c6.number_input("Fundada a partir de", 1900, 2026, 1900)
-    limite  = c7.slider("Máx resultados", 50, 2000, 500, 50)
-    st.markdown("")
+    c4,c5,c6,c7,c8 = st.columns(5)
+    fat_min    = c4.number_input("Fat. mín (R$ MM)", 0, value=int(_pre.get("fat_min",0)), step=10)
+    fat_max    = c5.number_input("Fat. máx (R$ MM)", 0, value=int(_pre.get("fat_max",0)), step=50)
+    ano_ini    = c6.number_input("Fundada após", 1900, 2026, int(_pre.get("ano_ini",1900)))
+    ano_fim    = c7.number_input("Fundada até", 1900, 2026, int(_pre.get("ano_fim",2026)))
+    limite     = c8.slider("Máx resultados", 50, 2000, int(_pre.get("limite",500)), 50)
 
-    if st.button("🔍  Buscar empresas →", type="primary"):
+    st.markdown(f"<p style='color:{VERDE_CLARO};font-weight:600;margin:.8rem 0 .3rem'>Filtros adicionais</p>", unsafe_allow_html=True)
+    fa1, fa2, fa3 = st.columns(3)
+    so_email       = fa1.checkbox("📧 Apenas com e-mail cadastrado", value=_pre.get("so_email", False))
+    excluir_pipe   = fa2.checkbox("🚫 Excluir empresas já no Pipeline", value=_pre.get("excluir_pipe", False))
+    ordenar_score  = fa3.checkbox("⭐ Ordenar por Score M&A", value=_pre.get("ordenar_score", True), help="Ordena os resultados pelo score de atratividade M&A calculado automaticamente")
+
+    sb1, sb2 = st.columns([3,1])
+    if sb1.button("🔍  Buscar empresas →", type="primary"):
         with st.spinner("Consultando base da Receita Federal..."):
             try:
-                df = buscar_rfb(uf, cnae, porte, fat_min, fat_max, ano_ini, limite)
+                df = buscar_rfb(
+                    uf=ufs_sel or None, cnae=cnae, porte=porte,
+                    fat_min_mm=fat_min, fat_max_mm=fat_max,
+                    ano_min=ano_ini, ano_max=ano_fim,
+                    limite=limite, nome=nome_busca, so_com_email=so_email
+                )
                 if df.empty:
                     st.warning("Nenhuma empresa encontrada. Tente ampliar os filtros.")
                 else:
-                    df["fat_est"]   = df.apply(lambda r: fat_estimado(r.get("capital_social",0), r.get("cnae","")), axis=1)
-                    df["ebitda_est"]= df.apply(lambda r: ebitda_estimado(r.get("fat_est",0), r.get("cnae","")), axis=1)
-                    df["porte_est"] = df["fat_est"].apply(porte_label)
+                    df["fat_est"]    = df.apply(lambda r: fat_estimado(r.get("capital_social",0), r.get("cnae","")), axis=1)
+                    df["ebitda_est"] = df.apply(lambda r: ebitda_estimado(r.get("fat_est",0), r.get("cnae","")), axis=1)
+                    df["porte_est"]  = df["fat_est"].apply(porte_label)
                     if fat_min > 0: df = df[df["fat_est"] >= fat_min*1e6]
                     if fat_max > 0: df = df[df["fat_est"] <= fat_max*1e6]
+                    # Score M&A
+                    fat_vals = df["fat_est"]
+                    fat_min_r, fat_max_r = fat_vals.min(), fat_vals.max()
+                    df["Score M&A"] = df.apply(lambda r: score_ma(r, fat_max_r, fat_min_r), axis=1)
+                    # Excluir do pipeline
+                    if excluir_pipe:
+                        pipe_cnpjs = set(pipe_listar()["cnpj"].astype(str).tolist())
+                        df = df[~df["cnpj"].astype(str).isin(pipe_cnpjs)]
                     st.session_state["rfb_df"] = df
+                    st.session_state["rfb_ordenar_score"] = ordenar_score
                     st.success(f"✅ {len(df)} empresas encontradas")
             except Exception as e:
-                st.error(f"Erro: {e}")
-                st.code(str(e))
+                st.error(f"Erro: {e}"); st.code(str(e))
+
+    # Salvar busca
+    with sb2.expander("💾 Salvar busca"):
+        nome_salvar = st.text_input("Nome da busca", placeholder="ex: TI SP acima 50MM")
+        if st.button("Salvar →", type="primary"):
+            if nome_salvar:
+                busca_salvar(nome_salvar, {
+                    "setor":setor,"cnae_manual":cnae_manual,"nome_busca":nome_busca,
+                    "porte":porte,"ufs_sel":ufs_sel,"fat_min":fat_min,"fat_max":fat_max,
+                    "ano_ini":ano_ini,"ano_fim":ano_fim,"limite":limite,
+                    "so_email":so_email,"excluir_pipe":excluir_pipe,"ordenar_score":ordenar_score
+                })
+                st.success("Salvo!"); st.rerun()
+            else:
+                st.warning("Digite um nome para a busca.")
 
     if "rfb_df" in st.session_state:
         df = st.session_state["rfb_df"]
-        m1,m2,m3,m4 = st.columns(4)
+        _ord_score = st.session_state.get("rfb_ordenar_score", True)
+        if _ord_score and "Score M&A" in df.columns:
+            df = df.sort_values("Score M&A", ascending=False)
+
+        m1,m2,m3,m4,m5 = st.columns(5)
         m1.metric("Empresas", len(df))
         m2.metric("Fat. médio estim.", f"R$ {df['fat_est'].mean()/1e6:.1f}MM" if len(df) else "-")
         m3.metric("EBITDA médio estim.", f"R$ {df['ebitda_est'].mean()/1e6:.1f}MM" if len(df) else "-")
         m4.metric("Capital médio", f"R$ {df['capital_social'].mean()/1e6:.1f}MM" if len(df) else "-")
+        m5.metric("Score médio M&A", f"{df['Score M&A'].mean():.0f}/100" if "Score M&A" in df.columns and len(df) else "-")
 
         t1,t2,t3,t4 = st.tabs(["📊 Resultados","🗺️ Mapa","🕸️ Grupos Econômicos","🏢 Ficha"])
         with t1:
@@ -488,9 +612,15 @@ elif modo.startswith("🔍"):
             s["Fat. Est. (R$MM)"]   = (s["fat_est"]/1e6).round(1)
             s["EBITDA Est. (R$MM)"] = (s["ebitda_est"]/1e6).round(1)
             s["Capital (R$MM)"]     = (s["capital_social"]/1e6).round(1)
-            cols = ["razao_social","cnae","uf","municipio","Fat. Est. (R$MM)","EBITDA Est. (R$MM)","Capital (R$MM)","porte_est","fundacao"]
-            st.dataframe(s[[c for c in cols if c in s.columns]], use_container_width=True, height=460)
-            export_df = s[[c for c in cols if c in s.columns]]
+            cols = ["Score M&A","razao_social","cnae","uf","municipio","Fat. Est. (R$MM)","EBITDA Est. (R$MM)","Capital (R$MM)","porte_est","email","fundacao"]
+            show = s[[c for c in cols if c in s.columns]]
+
+            # destaque visual do score com color_map
+            st.dataframe(
+                show.style.background_gradient(subset=["Score M&A"] if "Score M&A" in show.columns else [], cmap="Greens"),
+                use_container_width=True, height=460
+            )
+            export_df = show.copy()
             st.download_button("⬇️ Exportar Excel", to_excel_bytes(export_df, "Busca Ampla", "Busca Ampla — RFB"),
                                "naia_prospect.xlsx",
                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
