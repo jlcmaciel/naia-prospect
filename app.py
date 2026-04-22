@@ -219,18 +219,10 @@ def bq_query(sql: str) -> pd.DataFrame:
         return pd.DataFrame()
     return pandas_gbq.read_gbq(sql, project_id=project, credentials=_bq_creds())
 
-def buscar_rfb(uf=None, cnae="", porte="", fat_min_mm=0, fat_max_mm=0,
-               ano_min=1900, ano_max=2026, limite=500,
-               nome="", so_com_email=False) -> pd.DataFrame:
-    """
-    Busca empresas na RFB via BigQuery.
-    Filtros de faturamento são aplicados em Python pós-query (capital_social
-    não é proxy confiável de faturamento no Brasil — muitas empresas lucrativas
-    têm capital baixo). O BigQuery faz apenas os filtros estruturais.
-    """
+def _sql_rfb(uf=None, cnae="", porte="", fat_min_mm=0, fat_max_mm=0,
+             ano_min=1900, ano_max=2026, limite=500,
+             nome="", so_com_email=False):
     where = ["est.situacao_cadastral = '2'"]
-
-    # Filtros estruturais (aplicados direto no BigQuery)
     if uf:
         if isinstance(uf, list) and len(uf) == 1:
             where.append(f"est.sigla_uf = '{uf[0]}'")
@@ -243,18 +235,15 @@ def buscar_rfb(uf=None, cnae="", porte="", fat_min_mm=0, fat_max_mm=0,
         where.append(f"STARTS_WITH(CAST(est.cnae_fiscal_principal AS STRING), '{cnae}')")
     if porte:
         where.append(f"emp.porte = '{porte}'")
-    if ano_min > 1900:
+    if ano_min and ano_min > 1900:
         where.append(f"EXTRACT(YEAR FROM est.data_inicio_atividade) >= {ano_min}")
-    if ano_max < 2026:
+    if ano_max and ano_max < 2026:
         where.append(f"EXTRACT(YEAR FROM est.data_inicio_atividade) <= {ano_max}")
     if nome:
         where.append(f"UPPER(emp.razao_social) LIKE '%{nome.upper().strip()}%'")
     if so_com_email:
         where.append("est.email IS NOT NULL AND est.email != ''")
-
-    # Quando há filtro de fat, amplia o limite para garantir candidatos suficientes
     bq_limite = limite * 6 if (fat_min_mm > 0 or fat_max_mm > 0) else limite
-
     sql = f"""
     SELECT est.cnpj, emp.razao_social, est.nome_fantasia,
            est.cnae_fiscal_principal AS cnae, est.sigla_uf AS uf,
@@ -270,6 +259,14 @@ def buscar_rfb(uf=None, cnae="", porte="", fat_min_mm=0, fat_max_mm=0,
       AND {' AND '.join(where)}
     ORDER BY emp.capital_social DESC
     LIMIT {bq_limite}"""
+    return sql
+
+def buscar_rfb(uf=None, cnae="", porte="", fat_min_mm=0, fat_max_mm=0,
+               ano_min=1900, ano_max=2026, limite=500,
+               nome="", so_com_email=False) -> pd.DataFrame:
+    sql = _sql_rfb(uf, cnae, porte, fat_min_mm, fat_max_mm,
+                    ano_min, ano_max, limite, nome, so_com_email)
+    st.session_state["_last_sql"] = sql
     return bq_query(sql)
 
 def buscar_socios(cnpj_basicos: tuple) -> pd.DataFrame:
@@ -617,6 +614,9 @@ elif modo.startswith("🔍"):
                         st.success(f"✅ {n_depois} empresas encontradas (BigQuery: {n_bq} → após filtro fat.: {n_depois})")
             except Exception as e:
                 st.error(f"Erro: {e}"); st.code(str(e))
+
+        with st.expander("🔧 SQL gerado (debug)", expanded=False):
+            st.code(st.session_state.get("_last_sql","(nenhuma busca ainda)"), language="sql")
 
     if "rfb_df" in st.session_state:
         df = st.session_state["rfb_df"]
