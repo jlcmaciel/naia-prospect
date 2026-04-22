@@ -625,6 +625,50 @@ elif modo.startswith("🌎"):
             except Exception as e:
                 st.error(f"Erro ao consultar Comex Stat: {e}")
 
+    # ── Cruzamento Comex × RFB ────────────────────────────────────────────────
+    st.markdown("---")
+    st.markdown(f"<h3 style='color:{BRANCO}'>🔗 Prospectar empresas do setor exportador</h3><p style='color:#A5C8A5;font-size:.85rem'>Identifique o setor pelo Comex acima, depois busque os CNPJs correspondentes na aba Busca Ampla.</p>", unsafe_allow_html=True)
+
+    CRUZAMENTO = [
+        ("🌾 Agronegócio / Carnes",      "02, 04, 10", "10", "Alimentos — CNAE 10xx"),
+        ("🌲 Papel & Celulose",           "47, 48",     "17", "Papel/Celulose — CNAE 17xx"),
+        ("⛽ Petróleo & Derivados",       "27",         "19", "Petróleo — CNAE 19xx"),
+        ("🧪 Química & Fertilizantes",    "28, 31",     "20", "Química — CNAE 20xx"),
+        ("💊 Farmacêutica",               "30",         "21", "Farmacêutica — CNAE 21xx"),
+        ("⚙️ Metalurgia & Minério",       "26, 72",     "24", "Metalurgia — CNAE 24xx"),
+        ("💻 Eletrônicos & Semicond.",    "85",         "26", "Eletrônicos — CNAE 26xx"),
+        ("🏭 Máquinas & Equipamentos",    "84",         "28", "Máquinas — CNAE 28xx"),
+        ("🚗 Veículos & Autopeças",       "87, 84",     "29", "Veículos — CNAE 29xx"),
+        ("✈️ Aeronáutica",               "88",         "30", "Aeronáutica — CNAE 30xx"),
+        ("🚛 Transporte & Log.",          "89, 86",     "49", "Transporte — CNAE 49xx"),
+    ]
+
+    cols_header = st.columns([3, 2, 3, 2])
+    cols_header[0].markdown(f"<b style='color:{VERDE_CLARO}'>Setor exportador</b>", unsafe_allow_html=True)
+    cols_header[1].markdown(f"<b style='color:{VERDE_CLARO}'>NCM (Comex)</b>", unsafe_allow_html=True)
+    cols_header[2].markdown(f"<b style='color:{VERDE_CLARO}'>Buscar empresas por</b>", unsafe_allow_html=True)
+    cols_header[3].markdown(f"<b style='color:{VERDE_CLARO}'>CNAE</b>", unsafe_allow_html=True)
+
+    for setor, ncm_ref, cnae_cod, cnae_label in CRUZAMENTO:
+        c1, c2, c3, c4 = st.columns([3, 2, 3, 2])
+        c1.markdown(f"<span style='color:{BRANCO}'>{setor}</span>", unsafe_allow_html=True)
+        c2.markdown(f"<code style='background:{FUNDO_CARD};color:{VERDE_CLARO};padding:2px 6px;border-radius:4px'>{ncm_ref}</code>", unsafe_allow_html=True)
+        c3.markdown(f"<span style='color:#A5C8A5;font-size:.9rem'>{cnae_label}</span>", unsafe_allow_html=True)
+        if c4.button(f"Buscar →", key=f"cross_{cnae_cod}"):
+            st.session_state["_cnae_sugerido"] = cnae_cod
+            st.session_state["_setor_sugerido"] = setor
+            st.info(f"💡 Vá para **🔍 Busca Ampla** e use o CNAE `{cnae_cod}` para encontrar essas empresas.")
+
+    if "_cnae_sugerido" in st.session_state:
+        cnae_s = st.session_state["_cnae_sugerido"]
+        setor_s = st.session_state.get("_setor_sugerido","")
+        st.markdown(f"""
+        <div style='background:{FUNDO_CARD};border:1px solid {BORDA};border-radius:10px;padding:1rem;margin-top:.5rem'>
+          <p style='color:{VERDE_CLARO};margin:0;font-weight:600'>💡 Próximo passo sugerido</p>
+          <p style='color:{BRANCO};margin:.3rem 0 0'>Acesse <b>🔍 Busca Ampla</b> no menu lateral e filtre por CNAE <code>{cnae_s}</code> para prospectar empresas do setor <b>{setor_s}</b>.</p>
+        </div>
+        """, unsafe_allow_html=True)
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # MODO 4 — Pipeline
 # ═══════════════════════════════════════════════════════════════════════════════
