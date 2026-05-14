@@ -247,6 +247,14 @@ def _sql_rfb(uf=None, cnae="", porte="", fat_min_mm=0, fat_max_mm=0,
         where.append("est.email IS NOT NULL AND est.email != ''")
     bq_limite = limite * 6 if (fat_min_mm > 0 or fat_max_mm > 0) else limite
     sql = f"""
+    WITH part_est AS (
+      SELECT ano, mes FROM `basedosdados.br_me_cnpj.estabelecimentos`
+      GROUP BY ano, mes ORDER BY ano DESC, mes DESC LIMIT 1
+    ),
+    part_emp AS (
+      SELECT ano, mes FROM `basedosdados.br_me_cnpj.empresas`
+      GROUP BY ano, mes ORDER BY ano DESC, mes DESC LIMIT 1
+    )
     SELECT est.cnpj, emp.razao_social, est.nome_fantasia,
            est.cnae_fiscal_principal AS cnae, est.sigla_uf AS uf,
            est.id_municipio AS municipio, est.cep, est.email,
@@ -256,8 +264,10 @@ def _sql_rfb(uf=None, cnae="", porte="", fat_min_mm=0, fat_max_mm=0,
     FROM `basedosdados.br_me_cnpj.estabelecimentos` est
     JOIN `basedosdados.br_me_cnpj.empresas` emp
       ON est.cnpj_basico = emp.cnpj_basico
-    WHERE est.ano = 2024 AND est.mes = 4
-      AND emp.ano = 2024 AND emp.mes = 4
+    WHERE est.ano = (SELECT ano FROM part_est)
+      AND est.mes = (SELECT mes FROM part_est)
+      AND emp.ano = (SELECT ano FROM part_emp)
+      AND emp.mes = (SELECT mes FROM part_emp)
       AND {' AND '.join(where)}
     ORDER BY emp.capital_social DESC
     LIMIT {bq_limite}"""
